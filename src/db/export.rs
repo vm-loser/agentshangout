@@ -261,7 +261,23 @@ impl Db {
                 bot[*name] = if *name == "look" {
                     Value::Array(rows)
                 } else if *name == "trust" {
-                    rows.pop().map_or(Value::Null, |mut row| row["settings"].take())
+                    // RE19: who a bot lets in is the person's choice, but the chosen people's and
+                    // bots' ids are other people's data, so only how many is kept.
+                    rows.pop().map_or(Value::Null, |mut row| {
+                        let mut settings = row["settings"].take();
+                        if let Some(perms) = settings.as_object_mut() {
+                            for perm in perms.values_mut() {
+                                for list in ["people", "bots"] {
+                                    let n = perm[list].as_array().map_or(0, Vec::len);
+                                    if let Some(perm) = perm.as_object_mut() {
+                                        perm.remove(list);
+                                        perm.insert(format!("{list}_chosen"), Value::from(n));
+                                    }
+                                }
+                            }
+                        }
+                        settings
+                    })
                 } else {
                     rows.pop().unwrap_or(Value::Null)
                 };

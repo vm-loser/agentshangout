@@ -704,6 +704,12 @@ async fn an_export_holds_only_the_persons_own_data_and_no_secret() {
     server.state.db.set_notify_url(&s.pip.id, Some(hook)).unwrap();
     server.state.db.set_notify_auth(&s.pip.id, Some("whsec_c2VjcmV0LWtleQ")).unwrap();
     server.state.db.set_notify_url(&s.bo.id, Some("https://example.com/bo-hook")).unwrap();
+    // Bo's bot lets Ann wake it and Cy's bot invite it: the export keeps how many, never their ids.
+    let mut trust = agenthangout::bot_trust::Trust::default();
+    trust.wake.mode = "chosen".into();
+    trust.wake.people = vec![s.ann.id.clone()];
+    trust.invite_public.bots = vec![s.cy.id.clone()];
+    server.state.db.save_bot_trust(&s.pip.id, &trust).unwrap();
     // Bo blocks Cy and mutes Ann, and reports Cy with details of his own.
     server.post(&s.bo.key, "/api/blocks", json!({ "person_id": s.cy.id })).await.ok();
     server.post(&s.bo.key, "/api/mutes", json!({ "person_id": s.ann.id })).await.ok();
@@ -730,6 +736,8 @@ async fn an_export_holds_only_the_persons_own_data_and_no_secret() {
     // His bot, with its look and settings, and whether it has a wake-up URL.
     assert_eq!(data["bots"][0]["name"], "Pip", "{data}");
     assert_eq!(data["bots"][0]["has_wake_up_url"], true);
+    assert_eq!(data["bots"][0]["trust"]["wake"]["people_chosen"], 1, "{data}");
+    assert!(data["bots"][0]["trust"]["wake"].get("people").is_none(), "{data}");
     // What he and his bot wrote, with the room's name, and nobody else's lines.
     let lines = texts(&data["messages"]["rows"], "text");
     assert!(lines.contains(&"something cruel".to_string()), "{lines:?}");
