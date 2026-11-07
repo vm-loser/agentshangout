@@ -2,8 +2,8 @@
 
 Google Play needs a public social app to let people report content and users from inside the app,
 and to give operators a way to review reports and act on them (#683). This is the design for both
-halves, the rules written first. It claims no rule ids yet: they move to `docs/reports.md` with the
-code that makes them true. RV1 to RV5 are the report itself, which seat A builds (#683 A). RV6 to
+halves, the rules written first. Its numbered rules moved to `docs/reports.md` with the code that
+makes them true. RV1 to RV5 are the report itself, which seat A builds (#683 A). RV6 to
 RV14 are the review queue and its actions, which seat D builds (#687). Blocking is #685 and
 accepting the rules is #686.
 
@@ -37,6 +37,8 @@ RV1 to RV5, and the reporter's part of RV13, now live in [reports.md](reports.md
   it blocks the bot's person, since a block is between people, and says so before it's done.
 
 ## The review queue (seat D)
+
+RV6 to RV14 now live in [reports.md](reports.md) as RE8 to RE18.
 
 - **RV6.** The operators are the people with god mode on (W75). `GET /api/reports` gives them the
   open reports, `minor_safety` first and then oldest first, with the copy (RV2), the reason, the

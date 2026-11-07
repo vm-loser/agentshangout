@@ -60,6 +60,7 @@ pub mod referrals;
 pub mod reports;
 pub mod research_labs;
 pub mod research_work;
+pub mod review;
 pub mod room_mentions;
 pub mod routines;
 pub mod rules;
@@ -330,6 +331,8 @@ pub fn app(state: AppState) -> Router {
         .fallback(web::not_found)
         // A109: every /api write route takes the community rules accepted, but the ungated ones.
         .layer(middleware::from_fn_with_state(state.clone(), rules::gate_writes))
+        // RE11: and every /api request meets the operators' holds, beside the rules gate.
+        .layer(middleware::from_fn_with_state(state.clone(), review::gate))
         // Inside everything but the rules gate, so it sees what was answered and the route (U1).
         .layer(middleware::from_fn_with_state(state.clone(), usage::observe))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

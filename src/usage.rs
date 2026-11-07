@@ -601,6 +601,10 @@ pub async fn run(state: AppState) {
         let worker = state.clone();
         let done = tokio::task::spawn_blocking(move || {
             worker.usage.flush(&worker);
+            // RE16: and closed reports' copies past their 90 days.
+            if let Err(error) = crate::review::drop_old_copies(&worker) {
+                tracing::error!(status = %error.status, "old report copies could not be dropped");
+            }
             worker.db.sweep_usage(now())
         })
         .await;

@@ -166,7 +166,10 @@ async fn needs_you(State(state): State<AppState>, caller: Caller) -> ApiResult<J
             "bots": refused,
         })
     };
+    // RE14, RE15: what operators told them, and an operator's minor_safety alerts.
+    let notices = crate::review::notices_for(&state, &caller.person_id)?;
     let count = usize::from(!rules.is_null())
+        + notices.len()
         + questions.len()
         + bot_setups.len()
         + job_reports.len()
@@ -183,6 +186,7 @@ async fn needs_you(State(state): State<AppState>, caller: Caller) -> ApiResult<J
         + mentions.len();
     Ok(Json(json!({
         "rules": rules,
+        "notices": notices,
         "job_reports": job_reports,
         "bot_setups": bot_setups,
         "questions": questions,

@@ -149,6 +149,11 @@ pub const UNGATED_ROUTES: &[&str] = &[
     "POST /api/doorbell",
     "PUT /api/god-mode",
     "PUT /api/god-mode/bot-signups",
+    // RE10, RE12, RE16: operators acting on reports, and anyone marking a notice seen (RE14).
+    "POST /api/reports/{id}/close",
+    "POST /api/reports/{id}/release",
+    "POST /api/reports/lift",
+    "POST /api/notices/{id}/seen",
     // A bot asking its own owner, and the owner answering or clearing it.
     "POST /api/hangouts/{id}/owner-questions",
     "POST /api/owner-questions/{id}/answer",

@@ -3138,6 +3138,9 @@ pub(crate) fn call_tool(
     name: &str,
     args: &Value,
 ) -> ApiResult<Value> {
+    // RE11: a bot an operator paused, or whose person is restricted or banned, runs no tool. The
+    // bridge calls tools through here too, so this is the one place for them.
+    crate::review::require_tool(state, caller)?;
     // A house bot has a separate world, and nobody else gets to enter it.
     if caller.is_house {
         return call_house_tool(state, caller, name, args);

@@ -52,6 +52,10 @@ mod pulses;
 mod recycling;
 mod reports;
 pub use reports::{Filed, MyReport, NewReport};
+mod review;
+pub use review::{
+    Closing, Hold as ReviewHold, HoldRow, Holds, ModerationNotice, QueueReport, Released, Tell,
+};
 mod research_labs;
 mod research_work;
 mod room_mentions;
@@ -2356,6 +2360,54 @@ CREATE UNIQUE INDEX IF NOT EXISTS reports_one_open
 CREATE INDEX IF NOT EXISTS reports_by_reporter_day ON reports (reporter_id, day);
 CREATE INDEX IF NOT EXISTS reports_by_target ON reports (target_kind, target_id);
 CREATE INDEX IF NOT EXISTS reports_queue ON reports (status, reason, created_at);
+-- RE10 to RE12 (docs/reports.md): a bot an operator suspended. Only an operator lifts it, and its
+-- row goes with the bot.
+CREATE TABLE IF NOT EXISTS bot_suspensions (
+    agent_id     TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    reason       TEXT NOT NULL,
+    report_id    INTEGER,
+    operator_id  TEXT,
+    at           INTEGER NOT NULL
+);
+-- RE10 to RE12: a person an operator restricted or banned, until an operator lifts it.
+CREATE TABLE IF NOT EXISTS person_holds (
+    person_id    TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    hold         TEXT NOT NULL CHECK (hold IN ('restrict_person', 'ban_person')),
+    reason       TEXT NOT NULL,
+    report_id    INTEGER,
+    operator_id  TEXT,
+    at           INTEGER NOT NULL,
+    PRIMARY KEY (person_id, hold)
+);
+-- RE14, RE15: what an action tells its person, and the alert a minor_safety report sends each
+-- operator, shown until they've seen it. An alert names the report's id and nothing else.
+CREATE TABLE IF NOT EXISTS moderation_notices (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id    TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ('warn', 'suspend_bot', 'restrict_person',
+                     'ban_person', 'report_alert')),
+    report_id    INTEGER NOT NULL,
+    text         TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    seen_at      INTEGER,
+    UNIQUE (person_id, kind, report_id)
+);
+-- RE13: every action on a report and every lift or release, kept after the report's copy is
+-- dropped (RE16). Person ids are blanked with an account the way reports blank them (RE17).
+CREATE TABLE IF NOT EXISTS report_actions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id    INTEGER,
+    operator_id  TEXT,
+    action       TEXT NOT NULL CHECK (action IN ('dismiss', 'remove_content', 'warn',
+                     'suspend_bot', 'restrict_person', 'ban_person', 'lift_suspend_bot',
+                     'lift_restrict_person', 'lift_ban_person', 'release')),
+    note         TEXT CHECK (note IS NULL OR length(note) <= 1000),
+    subject_id   TEXT,
+    person_id    TEXT,
+    minor_safety INTEGER NOT NULL DEFAULT 0,
+    at           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS report_actions_by_report ON report_actions (report_id);
 "#;
 
 /// MY1: a week's mayor election.
@@ -16709,6 +16761,8 @@ impl Db {
         // RE6: reports they filed or that name them stay, with their id blanked, unless the
         // report is about a minor's safety: that one keeps everything.
         reports::blank_person(&tx, person_id)?;
+        // RE17: and the log of what operators did keeps rows, with the same ids blanked.
+        review::blank_person(&tx, person_id)?;
         tx.execute("DELETE FROM people WHERE id = ?", [person_id])?;
         tx.commit()?;
         Ok(gone)

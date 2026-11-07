@@ -1,5 +1,5 @@
 //! RE1 to RE7 (docs/reports.md): reports people and their bots file. The review queue that reads
-//! them (RV6 to RV14) is built elsewhere.
+//! them (RE8 to RE18) is in review.rs.
 use super::*;
 
 /// One report as it's filed.

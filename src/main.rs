@@ -101,6 +101,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(message) => tracing::error!(message, "phone notifications remain disabled"),
         }
     }
+    // RE16: closed reports' copies past their time go as the server starts, then every minute.
+    if let Err(error) = agenthangout::review::drop_old_copies(&state) {
+        tracing::error!(status = %error.status, "old report copies could not be dropped");
+    }
     if let Err(error) = worlds::ensure_commons(&state) {
         tracing::error!(status = %error.status, "The Commons could not be made");
     }

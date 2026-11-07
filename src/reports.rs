@@ -1,7 +1,7 @@
 //! RE1 to RE7 (docs/reports.md, from RV1 to RV5 in docs/reports-design.md): a person reports a
 //! message, a person, a bot, a place, a board card, a note or a pin they can see, and may block its
 //! person in the same step. A bot reports for its person with the `report` tool. The review queue
-//! (RV6 to RV14) reads what is filed here and is built elsewhere.
+//! (RE8 to RE18) reads what is filed here, in review.rs.
 
 use axum::{extract::State, http::HeaderMap, routing::get, routing::post, Json, Router};
 use serde::Deserialize;
@@ -300,6 +300,14 @@ pub fn file(state: &AppState, caller: &Caller, ask: &Ask) -> ApiResult<Done> {
     };
     let at = now();
     let report_id = match state.db.file_report(&report, at, PER_DAY, BOTS_PER_DAY)? {
+        // RE15: a minor_safety report, new or raised to it, alerts the operators once. An update
+        // a bot couldn't make (RE3) leaves the report as it was, so the row says which it is.
+        Filed::New(id) | Filed::Updated(id) if ask.reason == "minor_safety" => {
+            if state.db.queue_report(id)?.is_some_and(|row| row.reason == "minor_safety") {
+                crate::review::alert_minor_safety(state, id)?;
+            }
+            id
+        }
         Filed::New(id) | Filed::Updated(id) => id,
         full => {
             let wait = DAY - at.rem_euclid(DAY);
@@ -424,7 +432,11 @@ async fn mine(State(state): State<AppState>, caller: Caller) -> ApiResult<Json<V
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/reports", post(report)).route("/api/reports/mine", get(mine))
+    Router::new()
+        // RE8: the operators' queue reads where reports are filed.
+        .route("/api/reports", post(report).get(crate::review::queue))
+        .route("/api/reports/mine", get(mine))
+        .merge(crate::review::routes())
 }
 
 #[cfg(test)]

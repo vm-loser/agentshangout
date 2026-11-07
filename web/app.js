@@ -65,12 +65,34 @@ async function api(path, { method = 'GET', body } = {}, retried = false) {
     error.status = 403;
     throw error;
   }
+  // RE11: a suspended account's sign-in reaches only its own page, to delete it.
+  if (response.status === 403 && data.reason === 'banned') void showBanned();
   if (!response.ok) {
     const error = new Error(data.error || `Something went wrong (${response.status})`);
     error.status = response.status;
+    error.reason = data.reason;
     throw error;
   }
   return data;
+}
+
+// RE14, RE15: marks an operator's notice seen, so it isn't shown again.
+const seeNotice = (id) => api(`/api/notices/${encodeURIComponent(id)}/seen`, { method: 'POST', body: {} });
+
+// RE11: what a banned person sees instead of the site: why, and the way to delete their account.
+// A property of the function, not a variable, so it can't be read before it's declared.
+async function showBanned() {
+  if (showBanned.shown) return;
+  showBanned.shown = true;
+  const me = await api('/api/me').catch(() => null);
+  const told = (me?.notices || []).find((notice) => notice.kind === 'ban_person');
+  app.replaceChildren(h('main', { class: 'home' }, h('div', { class: 'card' },
+    h('h2', {}, 'Your account is suspended'),
+    h('p', {}, told ? told.text : 'An operator has suspended this account.'),
+    h('p', { class: 'muted' }, 'You can delete your account. Nothing else is open to you until an operator lifts the suspension.'),
+    h('div', { class: 'event-actions' },
+      me && !me.sign_in_session ? h('button', { type: 'button', class: 'ghost danger', onclick: () => deleteAccountDialog(me) }, 'Delete account') : null,
+      h('button', { type: 'button', class: 'ghost', onclick: async () => { await api('/api/session', { method: 'DELETE' }).catch(() => {}); showBanned.shown = false; await go('/'); } }, 'Sign out')))));
 }
 
 async function go(path) {
@@ -601,6 +623,18 @@ function showRulesNotice(me) {
     h('span', {}, `The community rules are new or changed. Please read and accept them by ${until}.`),
     h('button', { type: 'button', onclick: async () => { if (await acceptRules()) notice.remove(); } }, 'Read and accept'));
   document.body.append(notice);
+}
+
+// RE14, RE15: each notice an operator sent, or an operator's minor_safety alert, over the page
+// until it's marked seen. The text is the server's, put in as text.
+function showModerationNotices(me) {
+  for (const notice of me?.notices || []) {
+    if (document.querySelector(`.moderation-notice[data-id="${Number(notice.id)}"]`)) continue;
+    const bar = h('div', { class: 'rules-notice moderation-notice', role: 'status', 'data-id': String(Number(notice.id)) },
+      h('span', {}, notice.text),
+      h('button', { type: 'button', onclick: async () => { try { await seeNotice(notice.id); bar.remove(); } catch { /* it shows again next time */ } } }, 'Got it'));
+    document.body.append(bar);
+  }
 }
 
 async function showSocialStrip() {
@@ -4326,6 +4360,7 @@ async function roomView(id) {
   let { snapshot } = opened;
   const me = await api('/api/me').catch(() => null);
   showRulesNotice(me);
+  showModerationNotices(me);
   const shownMessages = new Set();
   const { lab: researchLab, state: researchState } = await researchLabLookup(id);
   // I82: what each shown line said, so a reply can say what it answers.
@@ -9001,9 +9036,21 @@ function needsYouPanel(panels) {
       h('div', { class: 'row' }, h('button', { type: 'button', onclick: done(() => acceptRules()) }, 'Read and accept')));
   }
 
+  // RE14, RE15: what an operator told them, or an operator's alert, until it's marked seen.
+  function noticeItem(notice) {
+    const error = formError();
+    return item(
+      h('p', {}, notice.text),
+      h('small', { class: 'muted' }, `Only you can see this · ${whenText(notice.at)}`),
+      h('div', { class: 'event-actions' },
+        h('button', { type: 'button', onclick: act(error, done(() => seeNotice(notice.id))) }, 'Got it')),
+      error);
+  }
+
   function render(list) {
     const parts = [
       ...(list.rules ? [rulesItem(list.rules)] : []),
+      ...(list.notices || []).map(noticeItem),
       ...(list.job_reports || []).map(jobReportItem),
       ...(list.bot_setups || []).map(botSetupItem),
       ...list.waiting.map(waitingItem),
@@ -9797,6 +9844,115 @@ function botSignupsPanel(panels) {
   };
 }
 
+// RE8 to RE12: the operators' review queue, for someone on the god list while god mode is on. Groups
+// come minor_safety first, then oldest first, each with its copy, why, and who reported it. Every
+// word from a report goes in as text. Closing, lifting and releasing each ask first.
+const REPORT_ACTIONS = [
+  ['dismiss', 'Dismiss: nothing was wrong'],
+  ['remove_content', 'Remove the message, card, note or pin'],
+  ['warn', 'Warn the person'],
+  ['suspend_bot', 'Suspend the bot'],
+  ['restrict_person', 'Restrict the person'],
+  ['ban_person', 'Ban the person'],
+];
+const HOLD_NAMES = { suspend_bot: 'Bot suspended', restrict_person: 'Restricted', ban_person: 'Banned' };
+function reportsPanel(panels) {
+  const body = panels.add('reports', 'Reports', { onOpen: () => load() });
+  const row = h('button', { type: 'button', class: 'wd-btn wide', hidden: true, onclick: () => panels.open('reports') }, 'Reports');
+  let ticket = 0;
+  async function load() {
+    const asked = ++ticket;
+    body.replaceChildren(h('p', { class: 'muted' }, 'Reading the reports…'));
+    try {
+      const data = await api('/api/reports');
+      if (asked === ticket) render(data);
+    } catch (failure) {
+      if (asked !== ticket) return;
+      body.replaceChildren(h('p', { class: 'error', role: 'alert' }, failure.message),
+        h('button', { type: 'button', onclick: load }, 'Try again'));
+    }
+  }
+  // The copy as the reporter saw it: one line a field.
+  const copyLines = (copy) => (copy && typeof copy === 'object' ? Object.entries(copy) : [])
+    .filter(([, value]) => value !== null && value !== '' && typeof value !== 'object')
+    .map(([key, value]) => h('li', {}, `${key}: ${value}`));
+  const reporterText = (report) => {
+    const who = report.reporter?.name || 'A deleted account';
+    return report.by_bot ? `${who}, through their bot ${report.bot?.name || ''}`.trim() : who;
+  };
+  function groupItem(group) {
+    const error = formError();
+    const select = h('select', { name: 'action', 'aria-label': 'Action' },
+      ...REPORT_ACTIONS.map(([value, label]) => h('option', { value }, label)));
+    const note = h('textarea', { name: 'note', maxLength: 1000, rows: 2, placeholder: 'A note for the log (optional)', 'aria-label': 'Note for the log' });
+    const close = act(error, async () => {
+      const label = REPORT_ACTIONS.find(([value]) => value === select.value)[1];
+      const many = group.reporters === 1 ? 'this report' : `all ${group.reporters} reports about it`;
+      if (!confirm(`${label}? This closes ${many}, and can't be undone.`)) return;
+      await api(`/api/reports/${encodeURIComponent(group.report_id)}/close`, { method: 'POST', body: { action: select.value, note: note.value } });
+      await load();
+    });
+    const about = [
+      group.person?.name ? `Person: ${group.person.name}` : null,
+      group.bot?.name ? `Bot: ${group.bot.name}` : null,
+      group.room?.name ? `Room: ${group.room.name}` : null,
+    ].filter(Boolean).join(' · ');
+    return h('article', { class: group.minor_safety ? 'check-in waiting report-urgent' : 'check-in' },
+      h('p', {}, group.minor_safety ? h('strong', {}, 'Minor safety. ') : null,
+        `${group.reasons.join(', ')} about a ${group.target_kind}, reported by ${group.reporters}`),
+      about ? h('p', { class: 'muted' }, about) : null,
+      h('ul', { class: 'report-copy' }, ...copyLines(group.copy)),
+      h('ul', {}, ...group.reports.map((report) => h('li', {},
+        `${reporterText(report)} (${report.reason}, ${whenText(report.created_at)})${report.details ? `: ${report.details}` : ''}`))),
+      field('Close with', select),
+      note,
+      h('div', { class: 'event-actions' }, h('button', { type: 'button', class: 'primary', onclick: close }, 'Close report')),
+      error);
+  }
+  function holdItem(hold) {
+    const error = formError();
+    const whose = hold.hold === 'suspend_bot' && hold.person?.name ? `, ${hold.person.name}'s bot` : '';
+    const lift = act(error, async () => {
+      if (!confirm(`Lift this for ${hold.name || 'them'}? They can act again straight away.`)) return;
+      await api('/api/reports/lift', { method: 'POST', body: { hold: hold.hold, id: hold.id } });
+      await load();
+    });
+    return h('li', {}, `${HOLD_NAMES[hold.hold] || hold.hold}: ${hold.name || 'someone who left'}${whose} (${hold.reason}, ${whenText(hold.at)}) `,
+      h('button', { type: 'button', class: 'link', onclick: lift }, 'Lift'), error);
+  }
+  function heldItem(held) {
+    const error = formError();
+    const release = act(error, async () => {
+      if (!confirm(`Release report ${held.report_id}? Its copy and details are dropped 90 days after it closed, which may be now.`)) return;
+      await api(`/api/reports/${encodeURIComponent(held.report_id)}/release`, { method: 'POST', body: {} });
+      await load();
+    });
+    return h('li', {}, `Report ${held.report_id}, closed ${whenText(held.closed_at)} `,
+      h('button', { type: 'button', class: 'link', onclick: release }, 'Release'), error);
+  }
+  function render(data) {
+    const groups = data.groups || [];
+    const holds = data.holds || [];
+    const held = data.held || [];
+    body.replaceChildren(
+      h('h3', {}, 'Open reports'),
+      ...(groups.length ? groups.map(groupItem) : [h('p', { class: 'muted' }, 'No open reports.')]),
+      h('h3', {}, 'Suspended, restricted and banned'),
+      holds.length ? h('ul', {}, ...holds.map(holdItem)) : h('p', { class: 'muted' }, 'Nobody.'),
+      held.length ? h('h3', {}, 'Minor-safety copies kept') : null,
+      held.length ? h('ul', {}, ...held.map(heldItem)) : null,
+      h('p', { class: 'muted fine' }, 'Only the people who run this site see this. Reporters only hear that their report was reviewed.'));
+  }
+  return {
+    row,
+    // Turning god mode off takes the panel away, even while it's open.
+    show(on) {
+      row.hidden = !on;
+      if (!on && panels.current === 'reports') panels.close(false);
+    },
+  };
+}
+
 // "/" is The Commons, and "/world/{id}" is any world.
 async function worldView(id, { home = false } = {}) {
   const path = encodeURIComponent(id);
@@ -9917,6 +10073,7 @@ async function worldView(id, { home = false } = {}) {
     }
     godButton?.setAttribute('aria-pressed', String(godOn));
     signups?.show(godOn);
+    reports?.show(godOn);
     // A tool that has gone, been turned off or locked again doesn't stay in your hand.
     // A place being moved keeps its kind in hand, even one that is full or not in the toolbar (W103).
     if (tool && !pendingMove && (!toolShown(tool) || placesFull.has(tool) || lockOf(tool))) choose(null);
@@ -9963,6 +10120,8 @@ async function worldView(id, { home = false } = {}) {
   const needs = me?.kind === 'person' ? needsYouPanel(panels) : null;
   // A114: only someone the god list names has it, and it shows while their god mode is on.
   const signups = typeof me?.god_mode === 'boolean' ? botSignupsPanel(panels) : null;
+  // RE8: the review queue, beside it and on the same terms.
+  const reports = typeof me?.god_mode === 'boolean' ? reportsPanel(panels) : null;
 
   let pendingResearchLab = null;
   let placingResearchLab = false;
@@ -10188,6 +10347,7 @@ async function worldView(id, { home = false } = {}) {
     ...notificationActions(me),
     moreRow('about', 'About'),
     signups?.row,
+    reports?.row,
     repoLink('wd-btn wide'),
     link('/docs', 'Docs', { class: 'wd-btn wide' }),
     link('/worlds', 'Worlds', { class: 'wd-btn wide' }),
@@ -11116,6 +11276,7 @@ async function route() {
     }
     else view = await homeView();
     app.replaceChildren(view);
+    if (showBanned.shown) return;
     if (view instanceof Node) document.documentElement.dataset.clientReady = 'true';
     // W112: on the map, a city or a house, never over a room or a link someone was sent.
     const stripHere = !roomMatch && !joinMatch && !joinCityMatch && !joinHouseMatch && !planMatch && !setupMatch && !COMING_BACK[path];
@@ -11124,6 +11285,7 @@ async function route() {
     // These pages need someone signed in, so only they save the clock.
     if (roomMatch || cityMatch || houseMatch) saveClock();
   } catch (error) {
+    if (showBanned.shown || error.reason === 'banned') return;
     if (error.status === 401 || error.status === 404) {
       history.replaceState({}, '', '/');
       try {

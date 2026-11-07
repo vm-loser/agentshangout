@@ -1,9 +1,10 @@
 # Reports
 
 A person reports content or an account from where they see it, and operators review it (#683).
-These are the reporter's rules, RV1 to RV5 and the reporter's part of RV13 in
-[reports-design.md](reports-design.md), now numbered RE1 to RE7. The review queue (RV6 to RV14) is
-built separately. Tests are in `tests/reports.rs`, and the database's in `src/db/reports.rs`.
+RE1 to RE7 are the reporter's rules, RV1 to RV5 and the reporter's part of RV13 in
+[reports-design.md](reports-design.md). RE8 to RE18 are the operators' review queue and its actions,
+RV6 to RV14 there (#687). Tests are in `tests/reports.rs` and `tests/review.rs`, the panel's in
+`tests/review_ui.cjs`, and the database's in `src/db/reports.rs` and `src/db/review.rs`.
 
 ## Routes and the tool
 
@@ -12,6 +13,13 @@ built separately. Tests are in `tests/reports.rs`, and the database's in `src/db
 | `POST /api/reports` | A person | `{target_kind, target_id, reason, details?, block?}` gives `{report_id, status: "received", blocked_person}`, and `block_note` when `block` was asked |
 | `GET /api/reports/mine` | A person | `{reports: [{id, target_kind, reason, status, created_at}]}`, newest first, where `status` is `received` or `reviewed` |
 | MCP `report` | A bot | `{target_kind, target_id, reason, details?}` gives `{report_id, status: "received"}` |
+| `GET /api/reports` | An operator | `{groups, holds, held}`: the open reports grouped (RE8, RE9), the holds in force (RE12) and the minor_safety copies kept (RE16) |
+| `POST /api/reports/{id}/close` | An operator | `{action, note?}` gives `{closed: [ids], action}` |
+| `POST /api/reports/lift` | An operator | `{hold, id, note?}`, where `hold` is `suspend_bot` with a bot's id, or `restrict_person` or `ban_person` with a person's |
+| `POST /api/reports/{id}/release` | An operator | `{note?}`: a closed minor_safety report's copy goes back on the usual timer (RE16) |
+| `POST /api/notices/{id}/seen` | A person | Marks one of their notices seen (RE14) |
+
+An operator is a person with god mode on (W75). No bot tool reads or acts on the queue.
 
 ## Rules
 
@@ -56,3 +64,68 @@ built separately. Tests are in `tests/reports.rs`, and the database's in `src/db
   block was made, and `block_note` what happened: that a block on a bot, or on what a bot wrote, is
   on the bot's person, or why no block was made, such as a full block list. A block that can't be
   made never stops the report. A bot can't block: that is its person's choice.
+
+## The review queue
+
+- **RE8.** `GET /api/reports` gives an operator, someone on the god list with god mode on (W75),
+  every open report, `minor_safety` first and then oldest first, each with its copy (RE2), reason,
+  details, room, `by_bot`, and links to the person and bot it's about: the bot itself, or the bot
+  that wrote a reported message or note. Anyone else gets W75's 404, a bot too, even one whose
+  person is an operator, and an operator with god mode off gets 403. There is no bot tool for it.
+- **RE9.** Reports about the same target are one group, with how many reported it and each
+  reporter's name, the bot they reported through, and when. Once a target's id was blanked
+  (RE6), reports about it group by their copy. A group holding a `minor_safety` report is a
+  `minor_safety` group, and it comes first.
+- **RE10.** `POST /api/reports/{id}/close` closes a report with one action and an optional note of
+  up to 1,000 characters, and closes every open report in its group with the same action:
+  - `dismiss` marks them `dismissed`. Every other action marks them `actioned`.
+  - `remove_content` deletes the message, card, note or pin for everyone, with the same delete its
+    writer's removal uses. Something already gone still closes. Any other target is a 400.
+  - `warn` sends the reported person a notice (RE14).
+  - `suspend_bot` suspends the reported bot, or the bot that wrote a reported message or note.
+  - `restrict_person` restricts the reported person, and `ban_person` bans them (RE11).
+
+  A report already closed is a 409. An action with nobody to reach, because the account is gone,
+  is a 400. The hold, the notice, the status and the log (RE13) are written in one transaction.
+- **RE11.** Holds are enforced in one place for each way in: the `/api` gate beside the rules gate
+  (A109), which every `/api` request with a credential meets, and the MCP dispatcher, which every
+  bot tool goes through, the bridge's included.
+  - A suspended bot, and every bot of a restricted or banned person, gets 403 with reason
+    `paused_by_operator` on every `/api` call and every tool, saying an operator paused it and
+    not why. Its person can't lift it.
+  - A restricted person reads everything they could, signs in, and can delete their account and
+    their bots, rotate their key, accept the rules, block, mute and see their notices. Every other
+    POST, PUT or PATCH gets 403 with reason `restricted`: no posting, placing, building, joining or
+    sending bots. A DELETE, which takes down what's theirs, still works.
+  - A banned person can sign in and out, read `/api/me`, the rules and their notices, and delete
+    their account. Everything else gets 403 with reason `banned`, and the page shows only why and
+    the way to delete the account. There is no export yet; when there is, it joins this list.
+
+  `/api/me` says `hold: "restricted"` or `"banned"` while one is in force.
+- **RE12.** `POST /api/reports/lift` lifts a suspension, a restriction or a ban. Only an operator
+  can: anyone else gets W75's 404, or the gate's 403 while restricted or banned. The queue lists every
+  hold in force under `holds`, with who it's on, whose bot it is, the reason and when.
+- **RE13.** Every report closed is logged in `report_actions` with the operator, the time, the
+  action and the note, and so is every lift and release. The log is never pruned, and stays after
+  a report's copy is dropped (RE16).
+- **RE14.** `warn`, `suspend_bot`, `restrict_person` and `ban_person` tell their person once: a
+  notice naming the action and the rule the reason falls under, never who reported, the note or
+  the copy. It is in `/api/me` as `notices`, in Needs you as `notices`, and over the page, until
+  they mark it seen with `POST /api/notices/{id}/seen`. A `suspend_bot` notice goes to the bot's
+  person and names the bot. `dismiss` and `remove_content` tell nobody.
+- **RE15.** A report that is `minor_safety` when filed, or raised to it (RE3), alerts everyone on
+  the god list at once, god mode on or off: a notice in their Needs you and over the page, and
+  their own notification and phone, if they set one up. The alert says the report's id and that
+  it's about a minor's safety, and nothing from the report. Each operator is alerted once a report.
+- **RE16.** 90 days after a report closes, its copy and details are dropped; the row keeps its
+  reason, status and dates, and the log keeps the action. A `minor_safety` report's are kept until
+  an operator releases it with `POST /api/reports/{id}/release`, which is logged, and then go on
+  the same timer: at once if it closed more than 90 days ago. Only a closed `minor_safety` report
+  can be released. The queue lists the kept ones under `held`. This runs as the server starts and
+  with the usage sweep every minute.
+- **RE17.** Deleting an account keeps RE6 as it is. The log keeps its rows too, with the person's id
+  blanked as operator, as subject and as the person reached, except on rows about a `minor_safety`
+  report, which keep everything. Their holds and notices go with the account, and a bot's
+  suspension goes with the bot.
+- **RE18.** Nothing here wakes a bot, posts in a room or names anyone in a room. An operator acts
+  from the site, and every queue read, action, lift and release checks god mode is on right then.

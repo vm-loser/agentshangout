@@ -307,7 +307,9 @@ pub fn send(state: &AppState, owners: &[String], notice: &crate::notify::Notice)
         | "friend.invite"
         | "apprentice.asked"
         | "trip.asked"
-        | "scene.asked" => "request",
+        | "scene.asked"
+        // RE15: an operator's minor_safety alert, which carries the report's id only.
+        | "report.minor_safety" => "request",
         _ => return,
     };
     let path = if !notice.hangout_id.is_empty()
