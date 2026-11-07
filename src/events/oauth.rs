@@ -361,6 +361,10 @@ async fn deliver_one(state: &AppState, mut sub: OAuthSubscription) -> Result<(),
     let Some(g) = permitted(state, &sub) else {
         return Ok(());
     };
+    // RE20: nothing goes to a paused bot. Its cursor stays, so what waits is sent once it lifts.
+    if crate::review::is_paused(state, &g.agent_id) {
+        return Ok(());
+    }
     let args: Value = serde_json::from_str(&sub.arguments).unwrap_or(json!({}));
     let rows = state.db.list_bot_events(
         &g.agent_id,

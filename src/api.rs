@@ -1277,6 +1277,13 @@ fn live_events(
             let mut emotes = false;
             let mut speaker: Option<String> = None;
             let event = match hub.recv().await {
+                // RE20: a hold landed. Every stream checks its caller again and says nothing.
+                Ok(event) if event.kind == crate::review::RECHECK => {
+                    match state.authenticate(secret_hash) {
+                        Ok(Some(caller)) if crate::review::may_stream(state, &caller) => continue,
+                        _ => return None,
+                    }
+                }
                 Ok(event) if event.hangout_id == *topic => {
                     human_typing = event.kind == "typing";
                     emotes = event.kind == "emotes";
@@ -1295,7 +1302,8 @@ fn live_events(
             };
             let still_allowed = match state.authenticate(secret_hash) {
                 Ok(Some(caller)) => {
-                    if !allowed(state, &caller, topic) {
+                    if !allowed(state, &caller, topic) || !crate::review::may_stream(state, &caller)
+                    {
                         return None;
                     }
                     if human_typing && caller.is_agent() {

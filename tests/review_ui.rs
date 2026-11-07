@@ -1,4 +1,5 @@
-//! RE8 to RE12: the operators' Reports panel, run from tests/review_ui.cjs.
+//! RE8 to RE12: the operators' Reports panel, and RE19's Download my data link, run from
+//! tests/review_ui.cjs.
 #[test]
 fn review_ui() {
     let output =

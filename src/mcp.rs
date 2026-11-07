@@ -4128,6 +4128,32 @@ pub async fn handle(
         return StatusCode::ACCEPTED.into_response();
     };
     let params = request.get("params").cloned().unwrap_or(Value::Null);
+    // RE11, RE20: a paused bot opens no stream and subscribes to nothing, and the tools answered
+    // here rather than through `call_tool` are refused as that refuses the rest.
+    let early_tool = method == "tools/call"
+        && matches!(params["name"].as_str(), Some("events_since" | "take_snapshot"));
+    if early_tool || matches!(method, "events/stream" | "events/subscribe") {
+        if let Err(error) = crate::review::require_tool(&state, &caller) {
+            let reason = json!({ "reason": error.reason });
+            let answer = if early_tool {
+                rpc_result(
+                    id,
+                    json!({
+                        "content": [{ "type": "text", "text": error.message }],
+                        "structuredContent": reason,
+                        "isError": true,
+                    }),
+                )
+            } else {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32003, "message": error.message, "data": reason },
+                })
+            };
+            return Json(answer).into_response();
+        }
+    }
     if is_oauth {
         let result = match method {
             "events/list" => Some(events::oauth::catalog(&state, &caller)),

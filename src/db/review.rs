@@ -279,6 +279,18 @@ impl Db {
         Ok(Holds { bot_suspended, restricted, banned })
     }
 
+    /// RE20: whether this bot is suspended, or its person is restricted or banned. False for an id
+    /// that isn't a bot's, such as a person's.
+    pub fn bot_paused(&self, agent_id: &str) -> rusqlite::Result<bool> {
+        self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM bot_suspensions WHERE agent_id = ?1)
+                 OR EXISTS (SELECT 1 FROM person_holds h JOIN agents a ON a.owner_id = h.person_id
+                             WHERE a.id = ?1)",
+            [agent_id],
+            |row| row.get(0),
+        )
+    }
+
     /// RE11: whether any hold exists at all, so a request needn't be looked at when none does.
     pub fn any_holds(&self) -> rusqlite::Result<bool> {
         self.conn().query_row(

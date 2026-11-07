@@ -664,3 +664,333 @@ async fn deleting_an_account_keeps_a_minor_safety_reports_log_ids() {
     assert_eq!(log[0]["person_id"], s.bo.id);
     assert_eq!(server.row(id)["target_person_id"], s.bo.id);
 }
+
+/// RE19: asks for the export, and gives the status, the `Retry-After` and `Content-Disposition`
+/// headers, and the body as text, so a test can search all of it.
+async fn export(
+    server: &Server,
+    token: &str,
+) -> (StatusCode, Option<String>, Option<String>, String) {
+    let url = format!("{}/api/account/export", server.base);
+    let mut request = server.client.get(url);
+    if !token.is_empty() {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.unwrap();
+    let header = |name: header::HeaderName| {
+        response.headers().get(name).map(|value| value.to_str().unwrap().to_string())
+    };
+    let (wait, disposition) = (header(header::RETRY_AFTER), header(header::CONTENT_DISPOSITION));
+    (response.status(), wait, disposition, response.text().await.unwrap())
+}
+
+fn texts(list: &Value, field: &str) -> Vec<String> {
+    let rows = list.as_array().unwrap_or_else(|| panic!("not a list: {list}"));
+    rows.iter().map(|row| text(&row[field])).collect()
+}
+
+// RE19: a person's export holds their own account, bots, writing, lists and the reports they
+// filed, and nothing of anyone else's: no other person's lines, no reports about them, no
+// reporter, no operator note, and no token, key or URL anywhere in it.
+#[tokio::test]
+async fn an_export_holds_only_the_persons_own_data_and_no_secret() {
+    let (server, justin, _) = Server::start().await;
+    server.god_mode(&justin, true).await;
+    let s = server.scene().await;
+    server.say(&s.ann, &s.room, "words Ann wrote").await.ok();
+    server.say(&s.cy, &s.room, "words Cy wrote").await.ok();
+    // Bo's bot has a wake-up URL and its key, and Bo has a notification URL of his own.
+    let hook = "http://127.0.0.1:9/hook-path";
+    server.state.db.set_notify_url(&s.pip.id, Some(hook)).unwrap();
+    server.state.db.set_notify_auth(&s.pip.id, Some("whsec_c2VjcmV0LWtleQ")).unwrap();
+    server.state.db.set_notify_url(&s.bo.id, Some("https://example.com/bo-hook")).unwrap();
+    // Bo blocks Cy and mutes Ann, and reports Cy with details of his own.
+    server.post(&s.bo.key, "/api/blocks", json!({ "person_id": s.cy.id })).await.ok();
+    server.post(&s.bo.key, "/api/mutes", json!({ "person_id": s.ann.id })).await.ok();
+    let mut filed = about("person", &s.cy.id, "spam");
+    filed["details"] = json!("details Bo gave");
+    let bo_filed = server.report(&s.bo, filed).await;
+    // Ann reports Bo's line, and an operator warns him with a note.
+    let about_bo = server.report(&s.ann, about("message", &s.line, "harassment")).await;
+    server.close(&justin, about_bo, "warn", Some("operator eyes only")).await.ok();
+
+    let (status, _, disposition, body) = export(&server, &s.bo.key).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let disposition = disposition.unwrap();
+    assert!(
+        disposition.starts_with("attachment") && disposition.contains(".json"),
+        "{disposition}"
+    );
+    let data: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(data["account"]["name"], "Bo");
+    assert!(data["account"]["created_at"].is_i64(), "{data}");
+    assert!(texts(&data["account"]["sign_in_methods"], "method").contains(&"owner_key".into()));
+    // The warning is his, naming the rule, and never the note or who reported.
+    assert_eq!(data["account"]["notices"][0]["kind"], "warn", "{data}");
+    // His bot, with its look and settings, and whether it has a wake-up URL.
+    assert_eq!(data["bots"][0]["name"], "Pip", "{data}");
+    assert_eq!(data["bots"][0]["has_wake_up_url"], true);
+    // What he and his bot wrote, with the room's name, and nobody else's lines.
+    let lines = texts(&data["messages"]["rows"], "text");
+    assert!(lines.contains(&"something cruel".to_string()), "{lines:?}");
+    assert!(lines.contains(&"bot spam".to_string()), "{lines:?}");
+    assert_eq!(data["messages"]["truncated"], false);
+    assert_eq!(data["messages"]["rows"][0]["room"]["name"], "Ann's room");
+    // His own lists.
+    assert_eq!(data["blocks"]["rows"][0]["name"], "Cy", "{data}");
+    assert_eq!(data["mutes"]["rows"][0]["name"], "Ann", "{data}");
+    // The report he filed: its reason, status and dates only.
+    let report = &data["reports_filed"]["rows"][0];
+    assert_eq!(report["id"], bo_filed, "{data}");
+    assert_eq!(report["reason"], "spam");
+    assert_eq!(report["status"], "received");
+    assert!(report.get("details").is_none() && report.get("target_id").is_none(), "{report}");
+    assert_eq!(data["reports_filed"]["rows"].as_array().unwrap().len(), 1);
+
+    // Nothing of anyone else's, and no secret, anywhere in the file.
+    let ann_id = format!("\"{}\"", s.ann.id);
+    let cy_id = format!("\"{}\"", s.cy.id);
+    for never in [
+        "words Ann wrote",
+        "words Cy wrote",
+        "operator eyes only",
+        "details Bo gave",
+        ann_id.as_str(),
+        cy_id.as_str(),
+        JUSTIN,
+        s.bo.key.as_str(),
+        s.pip.token.as_str(),
+        "ah_bot_",
+        "ah_owner_",
+        "ah_sess",
+        "ah_",
+        "whsec",
+        "hook-path",
+        "bo-hook",
+        "http://",
+        "https://",
+        "key_hash",
+        "token",
+        "secret",
+    ] {
+        assert!(!body.contains(never), "the export has {never:?}: {body}");
+    }
+    // Ann's own export has her line and none of Bo's, and the report about Bo is hers.
+    let (status, _, _, ann) = export(&server, &s.ann.key).await;
+    assert_eq!(status, StatusCode::OK, "{ann}");
+    assert!(ann.contains("words Ann wrote") && !ann.contains("something cruel"), "{ann}");
+    let ann: Value = serde_json::from_str(&ann).unwrap();
+    assert_eq!(ann["reports_filed"]["rows"][0]["id"], about_bo);
+    assert_eq!(ann["reports_filed"]["rows"][0]["status"], "reviewed");
+}
+
+// RE19: one export an hour, a bot can't ask, and a banned or restricted person still can.
+#[tokio::test]
+async fn an_export_is_once_an_hour_for_a_person_and_works_while_held() {
+    let (server, justin, _) = Server::start().await;
+    server.god_mode(&justin, true).await;
+    let s = server.scene().await;
+    let (status, _, _, body) = export(&server, &s.pip.token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, _, _, body) = export(&server, "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    assert_eq!(export(&server, &s.ann.key).await.0, StatusCode::OK);
+    let (status, wait, _, body) = export(&server, &s.ann.key).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    let wait: u64 = wait.expect("Retry-After").parse().unwrap();
+    assert!(wait > 3500 && wait <= 3600, "{wait}");
+    // A bot's ask didn't use its person's hour.
+    assert_eq!(export(&server, &s.bo.key).await.0, StatusCode::OK);
+
+    // A banned person reaches only their account, and their data.
+    let ban = server.report(&s.ann, about("person", &s.cy.id, "spam")).await;
+    server.close(&justin, ban, "ban_person", None).await.ok();
+    let room = format!("/api/hangouts/{}", s.room);
+    server.get(&s.cy.key, &room).await.refused(StatusCode::FORBIDDEN);
+    let (status, _, _, body) = export(&server, &s.cy.key).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let data: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(data["account"]["holds"][0]["hold"], "ban_person", "{data}");
+    assert_eq!(data["account"]["notices"][0]["kind"], "ban_person");
+    assert!(review::BANNED_ROUTES.contains(&"GET /api/account/export"));
+
+    // So does a restricted one, as a read.
+    let (_, dee) = server.someone("Dee").await;
+    let restrict = server.report(&s.ann, about("person", &dee.id, "spam")).await;
+    server.close(&justin, restrict, "restrict_person", None).await.ok();
+    let (status, _, _, body) = export(&server, &dee.key).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// RE20: a wake-up URL that counts what reaches it.
+async fn counter() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::{atomic::AtomicUsize, Arc};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let router = axum::Router::new().route(
+        "/wake",
+        axum::routing::post(move || {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                StatusCode::OK
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/wake", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (url, calls)
+}
+
+fn rings(calls: &std::sync::atomic::AtomicUsize) -> usize {
+    calls.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+async fn rung(calls: &std::sync::atomic::AtomicUsize, at_least: usize) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        if rings(calls) >= at_least {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// RE20: what an owner's answer sends a bot, straight to it.
+fn ring(server: &Server, agent_id: &str) {
+    let notice = agenthangout::notify::Notice {
+        event: "owner_question.answered",
+        hangout_id: String::new(),
+        text: "Your person answered.".into(),
+    };
+    agenthangout::notify::send(&server.state, &[agent_id.to_string()], &notice);
+}
+
+// RE20: a suspended bot's mention is recorded but rings nothing, nor does a ring sent straight to
+// it, and once the hold lifts its rings go again.
+#[tokio::test]
+async fn a_suspended_bot_is_rung_by_nothing_and_its_mentions_wait_for_it() {
+    let (server, justin, _) = Server::start().await;
+    server.god_mode(&justin, true).await;
+    let s = server.scene().await;
+    let (url, calls) = counter().await;
+    server.state.db.set_notify_url(&s.pip.id, Some(&url)).unwrap();
+    let id = server.report(&s.ann, about("bot", &s.pip.id, "spam")).await;
+    server.close(&justin, id, "suspend_bot", None).await.ok();
+    assert!(review::is_paused(&server.state, &s.pip.id));
+    assert!(!review::is_paused(&server.state, &s.bo.id));
+
+    let said = server.say(&s.bo, &s.room, "@Pip are you there").await.ok();
+    ring(&server, &s.pip.id);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(rings(&calls), 0, "a paused bot was rung");
+    // The mention is kept, for when it's back, and the skipped ring says why.
+    let waiting = server.state.db.unread_mentions(&s.pip.id).unwrap();
+    assert!(waiting.iter().any(|m| m.message_id == said["id"].as_i64().unwrap()));
+    let decided = server.state.db.wake_decisions(&s.pip.id).unwrap();
+    assert!(decided.iter().any(|d| d.reason == "operator_hold"), "{} decisions", decided.len());
+
+    let lift = json!({ "hold": "suspend_bot", "id": s.pip.id });
+    server.post(&justin.key, "/api/reports/lift", lift).await.ok();
+    assert!(!review::is_paused(&server.state, &s.pip.id));
+    ring(&server, &s.pip.id);
+    assert!(rung(&calls, 1).await, "a lifted bot wasn't rung");
+    server.say(&s.bo, &s.room, "@Pip welcome back").await.ok();
+    assert!(rung(&calls, 2).await, "the owner's mention didn't ring");
+}
+
+// RE20: a bot whose person is restricted is paused the same way.
+#[tokio::test]
+async fn a_restricted_persons_bot_is_rung_by_nothing_until_lifted() {
+    let (server, justin, _) = Server::start().await;
+    server.god_mode(&justin, true).await;
+    let s = server.scene().await;
+    let (url, calls) = counter().await;
+    server.state.db.set_notify_url(&s.pip.id, Some(&url)).unwrap();
+    let id = server.report(&s.ann, about("person", &s.bo.id, "spam")).await;
+    server.close(&justin, id, "restrict_person", None).await.ok();
+    assert!(review::is_paused(&server.state, &s.pip.id));
+
+    let said = server.say(&s.ann, &s.room, "@Pip hello").await.ok();
+    ring(&server, &s.pip.id);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(rings(&calls), 0, "a paused bot was rung");
+    let waiting = server.state.db.unread_mentions(&s.pip.id).unwrap();
+    assert!(waiting.iter().any(|m| m.message_id == said["id"].as_i64().unwrap()));
+
+    let lift = json!({ "hold": "restrict_person", "id": s.bo.id });
+    server.post(&justin.key, "/api/reports/lift", lift).await.ok();
+    ring(&server, &s.pip.id);
+    assert!(rung(&calls, 1).await, "a lifted bot wasn't rung");
+    server.say(&s.bo, &s.room, "@Pip welcome back").await.ok();
+    assert!(rung(&calls, 2).await, "the owner's mention didn't ring");
+}
+
+/// RE20: opens a bot's `events/stream`.
+async fn open_stream(server: &Server, token: &str) -> reqwest::Response {
+    let response = server
+        .client
+        .post(format!("{}/mcp", server.base))
+        .bearer_auth(token)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": "s1", "method": "events/stream",
+            "params": { "name": "mention" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    response
+}
+
+/// RE20: whether a stream ends by itself within five seconds.
+async fn ends<S, B, E>(mut stream: S) -> bool
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+{
+    use futures_util::StreamExt;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(left, stream.next()).await {
+            Ok(None) | Ok(Some(Err(_))) => return true,
+            Ok(Some(Ok(_))) => continue,
+            Err(_) => return false,
+        }
+    }
+}
+
+// RE20: a bot's open event stream and room stream close when a hold lands, and new ones are
+// refused while it's paused.
+#[tokio::test]
+async fn a_hold_closes_a_bots_open_streams_and_refuses_new_ones() {
+    use futures_util::StreamExt;
+    let (server, justin, _) = Server::start().await;
+    server.god_mode(&justin, true).await;
+    let s = server.scene().await;
+    let mut events = open_stream(&server, &s.pip.token).await.bytes_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), events.next()).await;
+    let first = String::from_utf8_lossy(&first.unwrap().unwrap().unwrap()).to_string();
+    assert!(first.contains("notifications/events/active"), "{first}");
+    let room = format!("{}/api/hangouts/{}/stream", server.base, s.room);
+    let room = server.client.get(room).bearer_auth(&s.pip.token).send().await.unwrap();
+    assert_eq!(room.status(), StatusCode::OK);
+    let room = room.bytes_stream();
+
+    let id = server.report(&s.ann, about("bot", &s.pip.id, "spam")).await;
+    server.close(&justin, id, "suspend_bot", None).await.ok();
+    // Both end on their own, with nothing more said in the room.
+    assert!(ends(events).await, "the event stream stayed open");
+    assert!(ends(room).await, "the room stream stayed open");
+
+    // New ones are refused, saying it's paused and not why.
+    let refused: Value = open_stream(&server, &s.pip.token).await.json().await.unwrap();
+    assert_eq!(refused["error"]["data"]["reason"], "paused_by_operator", "{refused}");
+    let waited = server.tool(&s.pip.token, "events_since", json!({ "wait_seconds": 1 })).await;
+    assert_eq!(waited["isError"], true, "{waited}");
+    let path = format!("/api/hangouts/{}/stream", s.room);
+    server.get(&s.pip.token, &path).await.refused(StatusCode::FORBIDDEN);
+}

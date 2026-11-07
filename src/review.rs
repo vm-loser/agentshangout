@@ -1,12 +1,12 @@
 //! RE8 to RE18 (docs/reports.md, from RV6 to RV14 in docs/reports-design.md): the operators'
 //! review queue for reports, the actions that close them, and the one place their holds are
 //! enforced. Operators are the people with god mode on (W75). Nothing here is a bot tool, wakes a
-//! bot, or posts in a room (RE18).
+//! bot, or posts in a room (RE18). RE20's `is_paused` is what every ring and stream asks.
 
 use axum::{
     extract::{rejection::JsonRejection, MatchedPath, Path, State},
     http::Method,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -35,10 +35,11 @@ const QUEUE_LIMIT: i64 = 1000;
 pub const PAUSED: &str = "an operator has paused this bot, so it can't act for now. Retrying \
                           won't help until an operator lifts it.";
 
-/// RE11: the `/api` routes a banned person can still reach, whatever the method: their account
-/// and deleting it, signing in and out, and seeing their notices.
+/// RE11: the `/api` routes a banned person can still reach, whatever the method: their account,
+/// deleting it and downloading its data (RE19), signing in and out, and seeing their notices.
 pub const BANNED_ROUTES: &[&str] = &[
     "GET /api/me",
+    "GET /api/account/export",
     "POST /api/me/delete",
     "POST /api/session",
     "DELETE /api/session",
@@ -73,6 +74,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/reports/{id}/release", post(release))
         .route("/api/reports/lift", post(lift))
         .route("/api/notices/{id}/seen", post(seen))
+        .route("/api/account/export", get(crate::export::download))
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -197,6 +199,45 @@ pub fn require_tool(state: &AppState, caller: &Caller) -> ApiResult<()> {
         Standing::Clear => Ok(()),
         held => Err(refusal(held)),
     }
+}
+
+/// RE20: whether this bot is paused: suspended, or its person restricted or banned. Every ring,
+/// webhook, OAuth delivery and push to a bot, and every open stream of one, asks this right before
+/// it goes on. With no holds anywhere it costs one query. A person's id is never paused, and a
+/// failed read counts as paused.
+pub fn is_paused(state: &AppState, agent_id: &str) -> bool {
+    if !state.db.any_holds().unwrap_or(true) {
+        return false;
+    }
+    state.db.bot_paused(agent_id).unwrap_or(true)
+}
+
+/// RE20: a hold just landed on these bots, so their open streams look again and close. Event
+/// streams and waiting polls hear it on the bot's own channel, and room streams on the hub.
+pub fn close_streams(state: &AppState, bots: &[String]) {
+    for agent_id in bots {
+        let _ =
+            state.bot_events.send(crate::events::Ping { agent_id: agent_id.clone(), event_id: 0 });
+    }
+    if !bots.is_empty() {
+        let _ = state.hub.send(crate::HubEvent {
+            hangout_id: String::new(),
+            kind: RECHECK,
+            data: "{}".into(),
+        });
+    }
+}
+
+/// RE20: the hub event that asks every open room stream to check its caller again. It is never
+/// sent on to a page.
+pub const RECHECK: &str = "recheck";
+
+/// RE20: whether a caller's open stream may stay open: not a paused bot, nor a banned person.
+pub fn may_stream(state: &AppState, caller: &Caller) -> bool {
+    if !state.db.any_holds().unwrap_or(true) {
+        return true;
+    }
+    !matches!(standing(state, caller), Ok(Standing::Paused | Standing::Banned) | Err(_))
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -521,6 +562,18 @@ async fn close(
         .db
         .close_report_group(&closing, now())?
         .ok_or_else(|| ApiError::conflict("that report is already closed"))?;
+    // RE20: the bots this pauses stop listening now, not at their next request.
+    let paused = match action {
+        "suspend_bot" => subject.into_iter().collect(),
+        "restrict_person" | "ban_person" => match &person_id {
+            Some(person) => {
+                state.db.agents_of(person, now())?.into_iter().map(|bot| bot.id).collect()
+            }
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    close_streams(&state, &paused);
     Ok(Json(json!({ "closed": closed, "action": action })))
 }
 

@@ -389,6 +389,10 @@ async fn deliver(state: &AppState, url: &str, notice: &Notice, auth: Option<&str
 
 /// Sends in the background, so a slow receiver never holds up whoever triggered this.
 pub fn send(state: &AppState, owner_ids: &[String], notice: &Notice) {
+    // RE20: a paused bot is rung by nothing, by URL or phone. A person's id is never paused.
+    let owner_ids: Vec<String> =
+        owner_ids.iter().filter(|id| !crate::review::is_paused(state, id)).cloned().collect();
+    let owner_ids = owner_ids.as_slice();
     crate::push::send(state, owner_ids, notice);
     for owner_id in owner_ids {
         let Ok(Some(url)) = state.db.notify_url(owner_id) else {
@@ -399,7 +403,13 @@ pub fn send(state: &AppState, owner_ids: &[String], notice: &Notice) {
         let auth = state.db.notify_auth(owner_id).ok().flatten();
         let state = state.clone();
         let notice = notice.clone();
-        tokio::spawn(async move { deliver(&state, &url, &notice, auth.as_deref()).await });
+        let owner_id = owner_id.clone();
+        tokio::spawn(async move {
+            // RE20: asked again as it goes, so a hold that lands meanwhile stops it.
+            if !crate::review::is_paused(&state, &owner_id) {
+                deliver(&state, &url, &notice, auth.as_deref()).await;
+            }
+        });
     }
 }
 
@@ -513,6 +523,11 @@ fn send_checked<F, M>(
     F: FnOnce(&AppState, Posted) + Send + 'static,
     M: Fn(&AppState) -> bool + Send + Sync + 'static,
 {
+    // RE20: every ring to a bot comes through here, and a paused bot gets none.
+    if crate::review::is_paused(state, agent_id) {
+        done(state, Posted::nothing("operator_hold"));
+        return;
+    }
     let Some(url) = state.db.notify_url(agent_id).ok().flatten() else {
         done(state, Posted::nothing("no_url"));
         return;
@@ -530,6 +545,7 @@ fn send_checked<F, M>(
         let allowed = || {
             state.db.notify_url(&agent_id).ok().flatten().as_deref() == Some(url.as_str())
                 && state.db.notify_auth(&agent_id).ok().flatten() == auth
+                && !crate::review::is_paused(&state, &agent_id)
                 && may(&state)
         };
         for delay in RETRY_DELAYS {

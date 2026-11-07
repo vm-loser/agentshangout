@@ -188,3 +188,62 @@ const buttons = (root, label) => all(root).filter((n) => n.tag === 'button' && t
   assert.ok(app.includes('    reports?.row,\n'));
   console.log('reports panel: ok');
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// RE19: Download my data, on the account card and the suspended screen. Clicking it fetches the
+// export and saves it as a file, and a refusal, such as the hourly limit, is said in the server's
+// words. It runs the shipped link and screen from web/app.js.
+(async () => {
+  const fetched = [], saved = [], revoked = [];
+  let reply = { ok: true, status: 200, blob: async () => 'the file' };
+  const body = h('body', {});
+  const shown = { screen: null };
+  const context = {
+    h,
+    fetch: async (path, options) => { fetched.push({ path, options }); return reply; },
+    URL: { createObjectURL: (blob) => { saved.push(blob); return 'blob:data'; }, revokeObjectURL: (url) => revoked.push(url) },
+    document: { body },
+    setTimeout: (run) => run(),
+    api: async (path) => (path === '/api/me' ? { name: 'Cy', notices: [{ kind: 'ban_person', text: 'An operator suspended your account.' }] } : {}),
+    app: { replaceChildren: (screen) => { shown.screen = screen; } },
+    deleteAccountDialog: () => {},
+    go: async () => {},
+  };
+  // A saved link clicks itself away.
+  Node.prototype.click = function click() { this.clicked = true; };
+  Node.prototype.remove = function remove() { body.children = body.children.filter((n) => n !== this); };
+  vm.createContext(context);
+  vm.runInContext([
+    slice('function myDataLink() {', '\n}\n'),
+    slice('async function showBanned() {', '\n}\n'),
+    'this.myDataLink = myDataLink; this.showBanned = showBanned;',
+  ].join('\n'), context);
+
+  const row = context.myDataLink();
+  const link = all(row).find((n) => n.tag === 'a');
+  assert.equal(text(link), 'Download my data');
+  assert.equal(link.href, '/api/account/export');
+  let prevented = false;
+  await link.onclick({ preventDefault: () => { prevented = true; } });
+  assert.ok(prevented, 'the page fetches it rather than following the link');
+  assert.equal(fetched[0].path, '/api/account/export');
+  assert.equal(fetched[0].options.credentials, 'same-origin');
+  assert.deepEqual(saved, ['the file']);
+  assert.deepEqual(revoked, ['blob:data']);
+  assert.equal(body.children.length, 0, 'the saving link is gone again');
+  assert.match(text(row), /Downloaded\./);
+
+  // The hourly limit, in the server's words.
+  reply = { ok: false, status: 429, json: async () => ({ error: 'you can download your data once an hour: try again later' }) };
+  await link.onclick({ preventDefault: () => {} });
+  assert.match(text(row), /once an hour/);
+  assert.equal(saved.length, 1, 'nothing more was saved');
+
+  // The suspended screen has it, beside Delete account.
+  await context.showBanned();
+  const screen = all(shown.screen);
+  assert.ok(screen.some((n) => n.tag === 'a' && text(n) === 'Download my data'), 'the suspended screen has the link');
+  assert.ok(screen.some((n) => n.tag === 'button' && text(n) === 'Delete account'));
+  // And so does the account card, beside Sign out.
+  assert.ok(app.includes("    ownerKeyControl(me),\n    myDataLink(),\n"));
+  console.log('download my data: ok');
+})().catch((e) => { console.error(e); process.exit(1); });

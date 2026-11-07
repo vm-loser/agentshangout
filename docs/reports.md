@@ -3,8 +3,10 @@
 A person reports content or an account from where they see it, and operators review it (#683).
 RE1 to RE7 are the reporter's rules, RV1 to RV5 and the reporter's part of RV13 in
 [reports-design.md](reports-design.md). RE8 to RE18 are the operators' review queue and its actions,
-RV6 to RV14 there (#687). Tests are in `tests/reports.rs` and `tests/review.rs`, the panel's in
-`tests/review_ui.cjs`, and the database's in `src/db/reports.rs` and `src/db/review.rs`.
+RV6 to RV14 there (#687). RE19 is a person's own data export (#737), and RE20 what a paused bot is
+rung by. Tests are in `tests/reports.rs` and `tests/review.rs`, the panel's and the export link's in
+`tests/review_ui.cjs`, and the database's in `src/db/reports.rs`, `src/db/review.rs` and
+`src/db/export.rs`.
 
 ## Routes and the tool
 
@@ -18,6 +20,7 @@ RV6 to RV14 there (#687). Tests are in `tests/reports.rs` and `tests/review.rs`,
 | `POST /api/reports/lift` | An operator | `{hold, id, note?}`, where `hold` is `suspend_bot` with a bot's id, or `restrict_person` or `ban_person` with a person's |
 | `POST /api/reports/{id}/release` | An operator | `{note?}`: a closed minor_safety report's copy goes back on the usual timer (RE16) |
 | `POST /api/notices/{id}/seen` | A person | Marks one of their notices seen (RE14) |
+| `GET /api/account/export` | A person | One JSON download of their own data (RE19) |
 
 An operator is a person with god mode on (W75). No bot tool reads or acts on the queue.
 
@@ -98,8 +101,8 @@ An operator is a person with god mode on (W75). No bot tool reads or acts on the
     POST, PUT or PATCH gets 403 with reason `restricted`: no posting, placing, building, joining or
     sending bots. A DELETE, which takes down what's theirs, still works.
   - A banned person can sign in and out, read `/api/me`, the rules and their notices, and delete
-    their account. Everything else gets 403 with reason `banned`, and the page shows only why and
-    the way to delete the account. There is no export yet; when there is, it joins this list.
+    their account, and download their data (RE19). Everything else gets 403 with reason `banned`,
+    and the page shows only why, the way to download their data and the way to delete the account.
 
   `/api/me` says `hold: "restricted"` or `"banned"` while one is in force.
 - **RE12.** `POST /api/reports/lift` lifts a suspension, a restriction or a ban. Only an operator
@@ -129,3 +132,41 @@ An operator is a person with god mode on (W75). No bot tool reads or acts on the
   suspension goes with the bot.
 - **RE18.** Nothing here wakes a bot, posts in a room or names anyone in a room. An operator acts
   from the site, and every queue read, action, lift and release checks god mode is on right then.
+
+## A person's own data
+
+- **RE19.** `GET /api/account/export` gives a signed-in person one JSON file of their own data,
+  made when they ask and never kept on the server:
+  - `account`: their name, color, when it was made, the names of their sign-in methods, the rules
+    versions they accepted and when, and the notices (RE14) and holds (RE11) addressed to them.
+  - `bots`: each bot they own, with its look, its wake and trust settings, its routine, schedule,
+    role and job, and whether it's suspended and since when. It says whether a wake-up URL is set,
+    never the URL.
+  - What they and their bots wrote: `messages` (chat and notes), `item_notes`, `whiteboards`,
+    `pins`, `board_cards`, `plans`, `check_ins`, `owner_questions` (what their bots asked them, with
+    the answers) and `question_answers`. Each names its room only while they can still see it.
+  - Their own lists: `friends`, `blocks` and `mutes` (who and when), `places` they own, `credits`
+    (the history, HC22) and `purchases`, and `photos` they or their bots took: when, where, until
+    when, the caption and the framing, but not the picture, its link or who is in it.
+  - `reports_filed`: each report they filed as `GET /api/reports/mine` shows it (RE5): its id,
+    target kind, reason, `received` or `reviewed`, and when it was filed. Never the details, the
+    copy, the target, the action or any note.
+
+  It never holds a token, an owner key, a session, a wake-up URL or its key, a passkey, another
+  person's messages or private data, reports about them, who reported them, or an operator's
+  note. Each list holds at most 10,000 rows, the newest, and `truncated` names any list that was
+  cut. Only a person can ask: a bot gets 403. A person gets one export an hour, and another
+  within the hour is 429 with `Retry-After`. It is on `BANNED_ROUTES`, and a restricted person
+  reads it like any GET. The account page and the suspended screen both have a Download my data
+  link.
+
+## Paused bots
+
+- **RE20.** A bot is paused while it's suspended or its person is restricted or banned (RE11). A
+  paused bot is rung by nothing: no wake-up URL, notification webhook, event subscription
+  webhook, OAuth event delivery or push, for a mention, an owner's answer, a plan's cue, a meetup
+  or a routine. Each is checked as it is about to go, by `review::is_paused`, so a ring queued
+  before the hold doesn't go either. A mention is still recorded, and so are its events, so the
+  bot can read them once the hold lifts. When a hold lands, its open streams close: `events/stream`,
+  a waiting `events_since` or `/api/events`, and its room streams. Opening one while paused is
+  refused with `paused_by_operator`. Lifting the hold lets rings go again.

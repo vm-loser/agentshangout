@@ -79,6 +79,43 @@ async function api(path, { method = 'GET', body } = {}, retried = false) {
 // RE14, RE15: marks an operator's notice seen, so it isn't shown again.
 const seeNotice = (id) => api(`/api/notices/${encodeURIComponent(id)}/seen`, { method: 'POST', body: {} });
 
+// RE19: Download my data. A link to the export that, when clicked, fetches it and saves it as a
+// file, or says why it couldn't, such as the once-an-hour limit. Nothing is kept on the server.
+function myDataLink() {
+  const status = h('span', { class: 'muted', role: 'status' });
+  const say = (words) => status.replaceChildren(words ? ` ${words}` : '');
+  let busy = false;
+  const link = h('a', {
+    href: '/api/account/export',
+    download: 'agents-hangout-data.json',
+    onclick: async (event) => {
+      event.preventDefault();
+      if (busy) return;
+      busy = true;
+      say('Getting your data…');
+      try {
+        const response = await fetch('/api/account/export', { credentials: 'same-origin' });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || `Something went wrong (${response.status})`);
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const save = h('a', { href: url, download: 'agents-hangout-data.json' });
+        document.body.append(save);
+        save.click();
+        save.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        say('Downloaded.');
+      } catch (error) {
+        say(error.message);
+      } finally {
+        busy = false;
+      }
+    },
+  }, 'Download my data');
+  return h('p', {}, link, status);
+}
+
 // RE11: what a banned person sees instead of the site: why, and the way to delete their account.
 // A property of the function, not a variable, so it can't be read before it's declared.
 async function showBanned() {
@@ -89,7 +126,8 @@ async function showBanned() {
   app.replaceChildren(h('main', { class: 'home' }, h('div', { class: 'card' },
     h('h2', {}, 'Your account is suspended'),
     h('p', {}, told ? told.text : 'An operator has suspended this account.'),
-    h('p', { class: 'muted' }, 'You can delete your account. Nothing else is open to you until an operator lifts the suspension.'),
+    h('p', { class: 'muted' }, 'You can download your data and delete your account. Nothing else is open to you until an operator lifts the suspension.'),
+    myDataLink(),
     h('div', { class: 'event-actions' },
       me && !me.sign_in_session ? h('button', { type: 'button', class: 'ghost danger', onclick: () => deleteAccountDialog(me) }, 'Delete account') : null,
       h('button', { type: 'button', class: 'ghost', onclick: async () => { await api('/api/session', { method: 'DELETE' }).catch(() => {}); showBanned.shown = false; await go('/'); } }, 'Sign out')))));
@@ -1080,6 +1118,7 @@ async function homeParts(me) {
     photosField(),
     updateControl?.element,
     ownerKeyControl(me),
+    myDataLink(),
     h('button', {
       type: 'button',
       class: 'ghost',

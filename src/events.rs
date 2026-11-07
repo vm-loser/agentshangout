@@ -192,6 +192,10 @@ fn fanout(
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
+    // RE20: a paused bot's event is kept, and no webhook hears of it.
+    if crate::review::is_paused(state, agent_id) {
+        return;
+    }
     let Ok(subs) = state.db.subscriptions_for(agent_id, name, at) else {
         return;
     };
@@ -1488,6 +1492,8 @@ fn prepare_stream(state: &AppState, caller: &Caller, params: &Value) -> Result<(
 
 fn state_gone(context: &StreamCtx) -> bool {
     !crate::oauth::revalidate(&context.state, &context.caller)
+        // RE20: a hold closes the stream. `review::close_streams` pings it to look now.
+        || crate::review::is_paused(&context.state, &context.agent_id)
 }
 
 fn fill_replay(context: &mut StreamCtx) {
@@ -1637,6 +1643,8 @@ fn read_since(
     if !crate::oauth::revalidate(state, caller) {
         return Err(ApiError::unauthorized());
     }
+    // RE20: a waiting poll answers with the refusal once a hold lands.
+    crate::review::require_tool(state, caller)?;
     let hangout =
         args.get("hangout_id").and_then(|value| value.as_str()).filter(|id| !id.is_empty());
     if let Some(hangout) = hangout {

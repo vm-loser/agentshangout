@@ -714,6 +714,10 @@ fn rings_for_mention(
     if state.db.doorbell_paused(&bot.id)? {
         return Ok(MentionRing::Skip("paused"));
     }
+    // RE20: an operator's hold. The mention is still kept, for when it lifts.
+    if crate::review::is_paused(state, &bot.id) {
+        return Ok(MentionRing::Skip("operator_hold"));
+    }
     if !owner && state.db.wakes_only_for_owner(&bot.id)? {
         return Ok(MentionRing::Skip("only_me"));
     }
